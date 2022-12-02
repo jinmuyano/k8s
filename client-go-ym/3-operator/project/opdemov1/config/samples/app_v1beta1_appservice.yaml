@@ -1,0 +1,17 @@
+apiVersion: app.ydzs.io/v1beta1
+kind: AppService
+metadata:
+  labels:
+    app.kubernetes.io/name: appservice
+    app.kubernetes.io/instance: appservice-sample
+    app.kubernetes.io/part-of: opdemov2
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: opdemov2
+  name: appservice-sample
+spec:
+  size: 2
+  image: nginx:1.7.9
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 30002
