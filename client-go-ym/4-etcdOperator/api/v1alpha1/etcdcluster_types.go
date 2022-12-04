@@ -53,6 +53,10 @@ type EtcdCluster struct {
 }
 
 //+kubebuilder:object:root=true
+//+kubebuilder:printcolumn:name="Image",type="string",JSONPath=".spec.image",description="The Docker Image of Etcd"
+//+kubebuilder:printcolumn:name="Size",type="integer",JSONPath=".spec.size",description="Replicas of Etcd"
+//+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+//+kubebuilder:subresource:status
 
 // EtcdClusterList contains a list of EtcdCluster
 type EtcdClusterList struct {

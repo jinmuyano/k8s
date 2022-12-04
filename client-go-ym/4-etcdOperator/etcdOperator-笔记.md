@@ -193,7 +193,7 @@ type EtcdClusterSpec struct {
 
 
 
-## 业务逻辑
+## 调谐.业务逻辑
 
 控制器的 Reconcile 函数中来实现我们自己的业务逻辑了。
 ```go
@@ -346,3 +346,229 @@ func MutateHeadlessSvc(cluster *v1alpha1.EtcdCluster, svc *corev1.Service) {
 }
 ```
 
+## 调谐方法
+
+根据我们的 EtcdCluter 去构造 StatefulSet 和 Headless SVC 资源对象，构造完成后，当我们创建 EtcdCluster 的时候就可以在控制器的 Reconcile 函数中去进行逻辑处理了，这里我们也可以使用前面示例中的代码来简单处理即可，代码如下所示：
+
+```go
+// controllers/etcdcluster_controller.go
+
+func (r *EtcdClusterReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
+	ctx := context.Background()
+	log := r.Log.WithValues("etcdcluster", req.NamespacedName)
+
+	// 首先我们获取 EtcdCluster 实例
+	var etcdCluster etcdv1alpha1.EtcdCluster
+	if err := r.Get(ctx, req.NamespacedName, &etcdCluster); err != nil {
+		// EtcdCluster was deleted，Ignore
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// 得到 EtcdCluster 过后去创建对应的StatefulSet和Service
+	// CreateOrUpdate
+
+	// (就是观察的当前状态和期望的状态进行对比)
+
+	// 调谐，获取到当前的一个状态，然后和我们期望的状态进行对比是不是就可以
+
+	// CreateOrUpdate Service
+	var svc corev1.Service
+	svc.Name = etcdCluster.Name
+	svc.Namespace = etcdCluster.Namespace
+	or, err := ctrl.CreateOrUpdate(ctx, r, &svc, func() error {
+		// 调谐必须在这个函数中去实现
+		MutateHeadlessSvc(&etcdCluster, &svc)
+		return controllerutil.SetControllerReference(&etcdCluster, &svc, r.Scheme)
+	})
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	log.Info("CreateOrUpdate", "Service", or)
+
+	// CreateOrUpdate StatefulSet
+	var sts appsv1.StatefulSet
+	sts.Name = etcdCluster.Name
+	sts.Namespace = etcdCluster.Namespace
+	or, err = ctrl.CreateOrUpdate(ctx, r, &sts, func() error {
+		// 调谐必须在这个函数中去实现
+		MutateStatefulSet(&etcdCluster, &sts)
+		return controllerutil.SetControllerReference(&etcdCluster, &sts, r.Scheme)
+	})
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	log.Info("CreateOrUpdate", "StatefulSet", or)
+
+	return ctrl.Result{}, nil
+}
+```
+
+## 优化.watch svc sts.rbac
+
+1. 现在同样我们也需要去对 StatefulSet 和 Service 这两种资源进行 Watch，因为当这两个资源出现变化的时候我们也需要去重新进行调谐，当然我们只需要 Watch **被 EtcdCluster 控制的这部分对象即可**。在 etcdcluster_controller.go 文件中更新 SetupWithManager 函数：
+
+```go
+func (r *EtcdClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&etcdv1alpha1.EtcdCluster{}).
+		Owns(&appsv1.StatefulSet{}).
+		Owns(&corev1.Service{}).
+		Complete(r)
+}
+```
+
+2. 然后在 Reconcile 函数注释中添加 StatefulSet 和 Service 的 RBAC 声明：
+
+```go
+//+kubebuilder:rbac:groups=etcd.ydzs.io,resources=etcdclusters,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=etcd.ydzs.io,resources=etcdclusters/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
+func (r *EtcdClusterReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
+```
+
+
+
+## 自定义输出列
+
+⚠️更新自定义列后,使用make install更新到集群(更新的crd资源yaml)
+
+$ kubectl get etcdcluster
+NAME         AGE
+myapp-demo   5d18h
+
+```go
+//+kubebuilder:object:root=true
+//+kubebuilder:printcolumn:name="Image",type="string",JSONPath=".spec.image",description="The Docker Image of Etcd"
+//+kubebuilder:printcolumn:name="Size",type="integer",JSONPath=".spec.size",description="Replicas of Etcd"
+//+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+//+kubebuilder:subresource:status
+
+// EtcdCluster is the Schema for the etcdclusters API
+type EtcdCluster struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   EtcdClusterSpec   `json:"spec,omitempty"`
+	Status EtcdClusterStatus `json:"status,omitempty"`
+}
+
+
+运行 make install 命令行，再次查看 CRD 数据：
+```
+
+
+
+`printcolumn` 注释有几个不同的选项，在这里我们只使用了其中一部分：
+
+- **name：**这是我们新增的列的标题，由 kubectl 打印在标题中
+- **type：**要打印的值的数据类型，有效类型为 integer、number、string、boolean 和 date
+- **JSONPath：**这是要打印数据的路径，在我们的例子中，镜像 image 属于 spec 下面的属性，所以我们使用 .`spec.image`。需要注意的是 JSONPath 属性引用的是生成的 JSON CRD，而不是引用本地 Go 类。
+- **description：**描述列的可读字符串，目前暂未发现该属性的作用...
+
+新增了注释后，我们需要运行 `make install` 命令重新生成 CRD 并安装，然后我们再次尝试列出 CRD。
+
+```shell
+$ kubectl get etcdcluster
+NAME         SIZE   AGE
+myapp-demo   3      5d18h
+```
+
+
+
+
+
+## 自定义-o wide列
+
+现在我们可以看到正则运行的应用副本数了，而且 AGE 信息也回来了，当然如果我们还想获取当前应用的状态，同样也可以通过 `+kubebuilder:printcolumn` 来添加对应的信息，只是状态的数据是通过 `.status` 在 JSONPath 属性中去获取了。
+
+如果你觉得这里添加了太多的信息，如果我们想隐藏某个字段并只在需要时显示该字段怎么办？这个时候就需要使用 priority 这个属性了，如果没有配置这个属性，默认值为0，也就是默认情况下列出显示的数据是 `priority=0` 的列，如果将 priority 设置为大于1的数字，那么则只会当我们使用 `-o wide` 参数的时候才会显示，比如我们给 Image 这一列添加一个 `priority=1` 的属性：
+
+```go
+// +kubebuilder:printcolumn:name="Image",type="string",priority=1,JSONPath=".spec.image",description="The Docker Image of Etcd"
+```
+
+```shell
+$ kubectl get etcdcluster -o wide           
+NAME         IMAGE                SIZE   AGE
+myapp-demo   cnych/etcd:v3.4.13   3      5d18h
+```
+
+[帮助Extend the Kubernetes API with CustomResourceDefinitions \| Kubernetes](https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#additional-printer-columns)
+
+
+
+
+
+## 代码调试
+
+### 安装crd对象至集群
+
+接下来我们首先安装我们的 CRD 对象，让我们的 Kubernetes 系统识别我们的 EtcdCluster 对象：
+
+```shell
+➜  make install
+/Users/ych/devs/projects/go/bin/controller-gen "crd:trivialVersions=true" rbac:roleName=manager-role webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+kustomize build config/crd | kubectl apply -f -
+customresourcedefinition.apiextensions.k8s.io/etcdclusters.etcd.ydzs.io configured
+```
+
+
+
+### 运行控制器
+
+```shell
+➜  make run    
+/Users/ych/devs/projects/go/bin/controller-gen object:headerFile="hack/boilerplate.go.txt" paths="./..."
+go fmt ./...
+go vet ./...
+/Users/ych/devs/projects/go/bin/controller-gen "crd:trivialVersions=true" rbac:roleName=manager-role webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+go run ./main.go
+2020-11-20T17:44:48.222+0800    INFO    controller-runtime.metrics      metrics server is starting to listen    {"addr": ":8080"}
+2020-11-20T17:44:48.223+0800    INFO    setup   starting manager
+2020-11-20T17:44:48.223+0800    INFO    controller-runtime.manager      starting metrics server {"path": "/metrics"}
+2020-11-20T17:44:48.223+0800    INFO    controller-runtime.controller   Starting EventSource    {"controller": "etcdcluster", "source": "kind source: /, Kind="}
+2020-11-20T17:44:48.326+0800    INFO    controller-runtime.controller   Starting Controller     {"controller": "etcdcluster"}
+2020-11-20T17:44:48.326+0800    INFO    controller-runtime.controller   Starting workers        {"controller": "etcdcluster", "worker count": 1}
+```
+
+
+
+### 创建CR资源对象
+
+```yaml
+apiVersion: etcd.ydzs.io/v1alpha1
+kind: EtcdCluster
+metadata:
+  name: etcd-sample
+spec:
+  size: 3
+  image: cnych/etcd:v3.4.13
+```
+
+另外开启一个终端创建上面的资源对象:
+```shell
+➜  kubectl apply -f config/samples/etcd_v1alpha1_etcdcluster.yaml
+etcdcluster.etcd.ydzs.io/etcd-sample created
+
+➜  kubectl get etcdcluster
+NAME          AGE
+etcd-sample   2m35s
+
+
+➜  kubectl get all -l app=etcd
+NAME                READY   STATUS    RESTARTS   AGE
+pod/etcd-sample-0   1/1     Running   0          85s
+pod/etcd-sample-1   1/1     Running   0          71s
+pod/etcd-sample-2   1/1     Running   0          66s
+
+NAME                  TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)             AGE
+service/etcd-sample   ClusterIP   None         <none>        2380/TCP,2379/TCP   86s
+
+NAME                           READY   AGE
+statefulset.apps/etcd-sample   3/3     87s
+```
+
+![https://bxdc-static.oss-cn-beijing.aliyuncs.com/images/20201120175739.png](https://bxdc-static.oss-cn-beijing.aliyuncs.com/images/20201120175739.png)
+
+## 
